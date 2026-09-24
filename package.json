@@ -1,0 +1,54 @@
+{
+  "name": "pi-image-budget",
+  "version": "0.1.0",
+  "description": "Pi extension that keeps image payloads within count and byte budgets so long, screenshot-heavy sessions never hit request-size (413) limits.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "pi-extension",
+    "images",
+    "context",
+    "413",
+    "request-size"
+  ],
+  "author": "aaalice233",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Aaalice233/pi-image-budget.git"
+  },
+  "homepage": "https://github.com/Aaalice233/pi-image-budget#readme",
+  "bugs": {
+    "url": "https://github.com/Aaalice233/pi-image-budget/issues"
+  },
+  "files": [
+    "src/*.ts",
+    "image-budget.schema.json",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --test test/*.test.ts",
+    "prepublishOnly": "npm run check && npm test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.87.1",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}
