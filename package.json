@@ -1,7 +1,7 @@
 {
   "name": "pi-image-budget",
-  "version": "0.1.0",
-  "description": "Pi extension that keeps image payloads within count and byte budgets so long, screenshot-heavy sessions never hit request-size (413) limits.",
+  "version": "0.2.0",
+  "description": "Pi extension with bounded image compression, count/byte budgets and model-specific recovery for image-heavy requests.",
   "type": "module",
   "keywords": [
     "pi-package",
@@ -41,6 +41,7 @@
   "scripts": {
     "check": "tsc --noEmit",
     "test": "node --test test/*.test.ts",
+    "bench": "node scripts/bench.ts",
     "prepublishOnly": "npm run check && npm test"
   },
   "peerDependencies": {

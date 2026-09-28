@@ -18,24 +18,29 @@ test("anthropic: oldest images become text, newest kept", () => {
 	assert.equal((payload.messages[0]!.content[0] as { type: string }).type, "text");
 	assert.equal(((payload.messages[1]!.content[0] as { content: Array<{ type: string }> }).content[0]!).type, "text");
 	assert.equal((payload.messages[2]!.content[0] as { type: string }).type, "image");
-	assert.ok(size(payload) <= result.bytesAfter + 50);
+	assert.equal(size(payload), result.bytesAfter);
 });
 
-test("openai chat, responses, gemini and bedrock shapes", () => {
-	const payload = {
-		a: [{ type: "image_url", image_url: { url: `data:image/png;base64,${b64(500)}` } }],
-		b: [{ type: "input_image", image_url: `data:image/png;base64,${b64(500)}` }],
-		c: [{ inlineData: { mimeType: "image/png", data: b64(500) } }],
-		d: [{ image: { format: "png", source: { bytes: b64(500) } } }],
-		keep: [{ type: "image_url", image_url: { url: `data:image/png;base64,${b64(500)}` } }],
-	};
-	const result = scrubPayload(payload, size(payload), 0, 1);
-	assert.equal(result.removed, 4);
-	assert.equal(payload.a[0]!.type, "text");
-	assert.equal((payload.b[0] as { type: string }).type, "input_text");
-	assert.ok("text" in payload.c[0]!);
-	assert.ok("text" in payload.d[0]!);
-	assert.equal(payload.keep[0]!.type, "image_url");
+test("openai chat, responses, gemini and bedrock real content envelopes", () => {
+	const shapes = [
+		{ field: "messages", parts: "content", block: { type: "image_url", image_url: { url: `data:image/png;base64,${b64(500)}` } }, type: "text" },
+		{ field: "input", parts: "content", block: { type: "input_image", image_url: `data:image/png;base64,${b64(500)}` }, type: "input_text" },
+		{ field: "contents", parts: "parts", block: { inlineData: { mimeType: "image/png", data: b64(500) } }, type: undefined },
+		{ field: "messages", parts: "content", block: { image: { format: "png", source: { bytes: b64(500) } } }, type: undefined },
+	];
+	for (const shape of shapes) {
+		const parts: any[] = [structuredClone(shape.block), structuredClone(shape.block)];
+		const schema = { example: [structuredClone(shape.block)] };
+		const payload = { [shape.field]: [{ role: "user", [shape.parts]: parts }], tools: [schema] };
+		const beforeSchema = JSON.stringify(schema);
+		const result = scrubPayload(payload, size(payload), 0, 1);
+		assert.equal(result.removed, 1);
+		assert.equal(parts[0].type, shape.type);
+		assert.equal(typeof parts[0].text, "string");
+		assert.deepEqual(parts[1], shape.block);
+		assert.equal(JSON.stringify(schema), beforeSchema, "never traverse tool schemas");
+		assert.equal(result.bytesAfter, size(payload));
+	}
 });
 
 test("no-op when already under the limit", () => {

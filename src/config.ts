@@ -14,6 +14,17 @@ export interface BudgetLimits {
 	maxImagesPerMessage: number;
 	/** Maximum total base64 bytes of the kept images. */
 	maxImageBytes: number;
+	/** Hard cap for one image's base64 size; larger images are downscaled (Anthropic rejects > 5 MB). */
+	maxBytesPerImage: number;
+	/** Hard cap for an image's width and height in pixels; larger images are downscaled. */
+	maxImageDimension: number;
+	/**
+	 * Re-encode images outside the protected newest ones to `compressMaxDimension` / `compressMaxBytes`
+	 * before any are dropped, so far more of them fit in the same budget.
+	 */
+	compress: boolean;
+	compressMaxDimension: number;
+	compressMaxBytes: number;
 	/** Maximum estimated size of the whole provider request body. */
 	maxRequestBytes: number;
 	/** The newest N images are never removed by count/size budgets. */
@@ -48,9 +59,14 @@ export const MiB = 1024 * 1024;
 
 export const DEFAULT_CONFIG: BudgetConfig = {
 	enabled: true,
-	maxImages: 8,
+	maxImages: 12,
 	maxImagesPerMessage: Infinity,
 	maxImageBytes: 16 * MiB,
+	maxBytesPerImage: Math.floor(4.5 * MiB),
+	maxImageDimension: 2000,
+	compress: true,
+	compressMaxDimension: 1280,
+	compressMaxBytes: 400 * 1024,
 	maxRequestBytes: 24 * MiB,
 	protectRecent: 2,
 	lowWatermark: 0.75,
@@ -64,14 +80,26 @@ export const DEFAULT_CONFIG: BudgetConfig = {
 	models: {},
 };
 
-const SIZE_KEYS = new Set(["maxImageBytes", "maxRequestBytes", "initialOverheadBytes"]);
-const COUNT_KEYS = new Set(["maxImages", "maxImagesPerMessage", "protectRecent", "maxAutoRecoveries"]);
-const BOOL_KEYS = new Set(["enabled", "dedupe", "payloadGuard", "autoRecover", "showStatus"]);
+const SIZE_KEYS = new Set(["maxImageBytes", "maxRequestBytes", "maxBytesPerImage", "compressMaxBytes", "initialOverheadBytes"]);
+const COUNT_KEYS = new Set([
+	"maxImages",
+	"maxImagesPerMessage",
+	"maxImageDimension",
+	"compressMaxDimension",
+	"protectRecent",
+	"maxAutoRecoveries",
+]);
+const BOOL_KEYS = new Set(["enabled", "dedupe", "compress", "payloadGuard", "autoRecover", "showStatus"]);
 const LIMIT_KEYS = new Set([
 	"maxImages",
 	"maxImagesPerMessage",
 	"maxImageBytes",
 	"maxRequestBytes",
+	"maxBytesPerImage",
+	"maxImageDimension",
+	"compress",
+	"compressMaxDimension",
+	"compressMaxBytes",
 	"protectRecent",
 	"lowWatermark",
 	"dedupe",
@@ -86,22 +114,31 @@ const UNITS: Record<string, number> = { "": 1, b: 1, k: 1024, kb: 1024, kib: 102
  */
 export function parseSize(value: unknown): number {
 	if (value === null || value === "unlimited" || value === "off") return Infinity;
-	if (typeof value === "number" && Number.isFinite(value) && value >= 0) return Math.floor(value);
+	if (typeof value === "number" && Number.isSafeInteger(Math.floor(value)) && value >= 0) return Math.floor(value);
 	if (typeof value === "string") {
 		const match = /^\s*(\d+(?:\.\d+)?)\s*([a-z]*)\s*$/i.exec(value);
 		const unit = match ? UNITS[match[2]!.toLowerCase()] : undefined;
-		if (match && unit !== undefined) return Math.floor(Number(match[1]) * unit);
+		if (match && unit !== undefined) {
+			const bytes = Math.floor(Number(match[1]) * unit);
+			if (Number.isSafeInteger(bytes)) return bytes;
+		}
 	}
 	throw new Error(`invalid size ${JSON.stringify(value)} (use e.g. "24MB", "512KB", a byte count, or null)`);
 }
 
 function parseCount(value: unknown): number {
 	if (value === null || value === "unlimited" || value === "off") return Infinity;
-	if (typeof value === "number" && Number.isInteger(value) && value >= 0) return value;
+	if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return value;
 	throw new Error(`invalid count ${JSON.stringify(value)} (use a non-negative integer or null)`);
 }
 
 function parseValue(key: string, value: unknown): unknown {
+	if (["maxBytesPerImage", "compressMaxBytes", "maxImageDimension", "compressMaxDimension", "initialOverheadBytes", "protectRecent", "maxAutoRecoveries"].includes(key)) {
+		const parsed = SIZE_KEYS.has(key) ? parseSize(value) : parseCount(value);
+		const min = ["maxBytesPerImage", "compressMaxBytes", "maxImageDimension", "compressMaxDimension"].includes(key) ? 1 : 0;
+		if (!Number.isSafeInteger(parsed) || parsed < min) throw new Error(`expected a finite value ≥ ${min}`);
+		return parsed;
+	}
 	if (SIZE_KEYS.has(key)) return parseSize(value);
 	if (COUNT_KEYS.has(key)) return parseCount(value);
 	if (BOOL_KEYS.has(key)) {
@@ -208,7 +245,11 @@ export interface ModelLike {
 	id?: string;
 	inputLimits?: {
 		maxRequestBytes?: number;
-		images?: { maxPerMessage?: number; maxPerRequest?: number };
+		images?: {
+			maxPerMessage?: number;
+			maxPerRequest?: number;
+			resize?: { maxWidth?: number; maxHeight?: number; maxBytes?: number };
+		};
 	};
 }
 
@@ -223,6 +264,11 @@ export function resolveLimits(config: BudgetConfig, model: ModelLike | undefined
 		maxImagesPerMessage: config.maxImagesPerMessage,
 		maxImageBytes: config.maxImageBytes,
 		maxRequestBytes: config.maxRequestBytes,
+		maxBytesPerImage: config.maxBytesPerImage,
+		maxImageDimension: config.maxImageDimension,
+		compress: config.compress,
+		compressMaxDimension: config.compressMaxDimension,
+		compressMaxBytes: config.compressMaxBytes,
 		protectRecent: config.protectRecent,
 		lowWatermark: config.lowWatermark,
 		dedupe: config.dedupe,
@@ -232,11 +278,15 @@ export function resolveLimits(config: BudgetConfig, model: ModelLike | undefined
 		if (globToRegExp(pattern).test(key)) Object.assign(limits, overrides);
 	}
 	const catalog = model?.inputLimits;
-	if (catalog?.maxRequestBytes) limits.maxRequestBytes = Math.min(limits.maxRequestBytes, catalog.maxRequestBytes);
-	if (catalog?.images?.maxPerRequest) limits.maxImages = Math.min(limits.maxImages, catalog.images.maxPerRequest);
-	if (catalog?.images?.maxPerMessage) {
+	if (typeof catalog?.maxRequestBytes === "number" && catalog.maxRequestBytes >= 0) limits.maxRequestBytes = Math.min(limits.maxRequestBytes, catalog.maxRequestBytes);
+	if (typeof catalog?.images?.maxPerRequest === "number" && catalog.images.maxPerRequest >= 0) limits.maxImages = Math.min(limits.maxImages, catalog.images.maxPerRequest);
+	if (typeof catalog?.images?.maxPerMessage === "number" && catalog.images.maxPerMessage >= 0) {
 		limits.maxImagesPerMessage = Math.min(limits.maxImagesPerMessage, catalog.images.maxPerMessage);
 	}
+	const resize = catalog?.images?.resize;
+	const catalogDimension = Math.min(resize?.maxWidth || Infinity, resize?.maxHeight || Infinity);
+	limits.maxImageDimension = Math.min(limits.maxImageDimension, catalogDimension);
+	if (resize?.maxBytes) limits.maxBytesPerImage = Math.min(limits.maxBytesPerImage, resize.maxBytes);
 	return limits;
 }
 

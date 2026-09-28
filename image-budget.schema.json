@@ -2,148 +2,63 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "pi-image-budget configuration",
   "type": "object",
+  "additionalProperties": false,
   "definitions": {
+    "finiteSize": {
+      "oneOf": [
+        { "type": "integer", "minimum": 1 },
+        { "type": "string", "pattern": "^\\s*\\d+(\\.\\d+)?\\s*([kKmMgG]([iI]?[bB])?|[bB])?\\s*$" }
+      ]
+    },
     "size": {
-      "description": "Bytes as a number, a string such as \"24MB\" / \"512KB\" (1024-based), or null for unlimited.",
+      "description": "Bytes, a binary unit string (e.g. 24MB), or null for unlimited.",
       "oneOf": [
-        {
-          "type": "integer",
-          "minimum": 0
-        },
-        {
-          "type": "string",
-          "pattern": "^\\s*\\d+(\\.\\d+)?\\s*([kKmMgG]([iI]?[bB])?|[bB])?\\s*$"
-        },
-        {
-          "type": "null"
-        }
+        { "type": "integer", "minimum": 0 },
+        { "type": "string", "pattern": "^\\s*\\d+(\\.\\d+)?\\s*([kKmMgG]([iI]?[bB])?|[bB])?\\s*$" },
+        { "type": "null" }
       ]
     },
-    "count": {
-      "description": "Non-negative integer, or null for unlimited.",
-      "oneOf": [
-        {
-          "type": "integer",
-          "minimum": 0
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
+    "count": { "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }] },
     "limits": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "maxImages": {
-          "$ref": "#/definitions/count",
-          "description": "Maximum images kept in one request. Default 8."
-        },
-        "maxImagesPerMessage": {
-          "$ref": "#/definitions/count",
-          "description": "Maximum images kept in one message. Default unlimited."
-        },
-        "maxImageBytes": {
-          "$ref": "#/definitions/size",
-          "description": "Maximum total base64 bytes of kept images. Default 16MB."
-        },
-        "maxRequestBytes": {
-          "$ref": "#/definitions/size",
-          "description": "Maximum estimated request body size. Default 24MB."
-        },
-        "protectRecent": {
-          "type": "integer",
-          "minimum": 0,
-          "description": "Newest N images are never removed by budgets. Default 2."
-        },
-        "lowWatermark": {
-          "type": "number",
-          "exclusiveMinimum": 0,
-          "maximum": 1,
-          "description": "Evict down to limit x this ratio. Default 0.75."
-        },
-        "dedupe": {
-          "type": "boolean",
-          "description": "Replace earlier byte-identical images. Default true."
-        }
+        "maxImages": { "$ref": "#/properties/maxImages" },
+        "maxImagesPerMessage": { "$ref": "#/properties/maxImagesPerMessage" },
+        "maxImageBytes": { "$ref": "#/properties/maxImageBytes" },
+        "maxRequestBytes": { "$ref": "#/properties/maxRequestBytes" },
+        "maxBytesPerImage": { "$ref": "#/properties/maxBytesPerImage" },
+        "maxImageDimension": { "$ref": "#/properties/maxImageDimension" },
+        "compress": { "$ref": "#/properties/compress" },
+        "compressMaxBytes": { "$ref": "#/properties/compressMaxBytes" },
+        "compressMaxDimension": { "$ref": "#/properties/compressMaxDimension" },
+        "protectRecent": { "$ref": "#/properties/protectRecent" },
+        "lowWatermark": { "$ref": "#/properties/lowWatermark" },
+        "dedupe": { "$ref": "#/properties/dedupe" }
       }
     }
   },
   "properties": {
-    "$schema": {
-      "type": "string"
-    },
-    "enabled": {
-      "type": "boolean",
-      "description": "Default true."
-    },
-    "payloadGuard": {
-      "type": "boolean",
-      "description": "Scrub the provider payload if it still exceeds maxRequestBytes. Default true."
-    },
-    "autoRecover": {
-      "type": "boolean",
-      "description": "After HTTP 413, lower the limit and retry automatically. Default true."
-    },
-    "maxAutoRecoveries": {
-      "type": "integer",
-      "minimum": 0,
-      "description": "Automatic 413 retries per prompt. Default 2."
-    },
-    "initialOverheadBytes": {
-      "$ref": "#/definitions/size",
-      "description": "Assumed non-message request size before the first measurement. Default 512KB."
-    },
-    "showStatus": {
-      "type": "boolean",
-      "description": "Show kept/total images in the footer when images are omitted. Default true."
-    },
-    "locale": {
-      "enum": [
-        "auto",
-        "en",
-        "zh-CN"
-      ],
-      "description": "Notification language. Default auto."
-    },
-    "models": {
-      "type": "object",
-      "description": "Per-model overrides keyed by provider/modelId glob, e.g. \"my-gateway/*\".",
-      "additionalProperties": {
-        "$ref": "#/definitions/limits"
-      }
-    },
-    "maxImages": {
-      "$ref": "#/definitions/count",
-      "description": "Maximum images kept in one request. Default 8."
-    },
-    "maxImagesPerMessage": {
-      "$ref": "#/definitions/count",
-      "description": "Maximum images kept in one message. Default unlimited."
-    },
-    "maxImageBytes": {
-      "$ref": "#/definitions/size",
-      "description": "Maximum total base64 bytes of kept images. Default 16MB."
-    },
-    "maxRequestBytes": {
-      "$ref": "#/definitions/size",
-      "description": "Maximum estimated request body size. Default 24MB."
-    },
-    "protectRecent": {
-      "type": "integer",
-      "minimum": 0,
-      "description": "Newest N images are never removed by budgets. Default 2."
-    },
-    "lowWatermark": {
-      "type": "number",
-      "exclusiveMinimum": 0,
-      "maximum": 1,
-      "description": "Evict down to limit x this ratio. Default 0.75."
-    },
-    "dedupe": {
-      "type": "boolean",
-      "description": "Replace earlier byte-identical images. Default true."
-    }
-  },
-  "additionalProperties": false
+    "$schema": { "type": "string" },
+    "enabled": { "type": "boolean", "default": true },
+    "maxImages": { "$ref": "#/definitions/count", "description": "Maximum kept images; default 12." },
+    "maxImagesPerMessage": { "$ref": "#/definitions/count", "description": "Also enforced after provider message merging; default unlimited." },
+    "maxImageBytes": { "$ref": "#/definitions/size", "description": "Total base64 bytes; default 16MB." },
+    "maxRequestBytes": { "$ref": "#/definitions/size", "description": "Total JSON body bytes; default 24MB." },
+    "maxBytesPerImage": { "$ref": "#/definitions/finiteSize", "description": "Single-image base64 hard cap; default 4.5MB. Must be finite and positive." },
+    "maxImageDimension": { "type": "integer", "minimum": 1, "default": 2000 },
+    "compress": { "type": "boolean", "default": true },
+    "compressMaxBytes": { "$ref": "#/definitions/finiteSize", "description": "Older image base64 target; default 400KB. Must be finite and positive." },
+    "compressMaxDimension": { "type": "integer", "minimum": 1, "default": 1280 },
+    "protectRecent": { "type": "integer", "minimum": 0, "default": 2, "description": "Prefer original newest images; hard per-image/count caps still apply; compress as a last resort." },
+    "lowWatermark": { "type": "number", "exclusiveMinimum": 0, "maximum": 1, "default": 0.75 },
+    "dedupe": { "type": "boolean", "default": true },
+    "payloadGuard": { "type": "boolean", "default": true },
+    "autoRecover": { "type": "boolean", "default": true, "description": "Allow extension-initiated continuations. Does not disable Pi's own retry policy." },
+    "maxAutoRecoveries": { "type": "integer", "minimum": 0, "default": 2 },
+    "initialOverheadBytes": { "anyOf": [{ "$ref": "#/definitions/finiteSize" }, { "const": 0 }], "description": "Initial system/tool overhead estimate; default 512KB." },
+    "showStatus": { "type": "boolean", "default": true },
+    "locale": { "enum": ["auto", "en", "zh-CN"], "default": "auto" },
+    "models": { "type": "object", "additionalProperties": { "$ref": "#/definitions/limits" }, "description": "provider/modelId glob overrides, applied in insertion order." }
+  }
 }

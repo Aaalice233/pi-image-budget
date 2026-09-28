@@ -2,7 +2,9 @@
 //
 // Starts a mock OpenAI-compatible endpoint that rejects bodies above LIMIT with HTTP 413 (like a
 // gateway), then drives several print-mode turns in one session, each attaching a fresh screenshot.
-// Usage: node scripts/e2e.mjs [--without-extension]
+// --buffer-error answers oversized bodies like a relay whose retry buffer overflowed (HTTP 500 with text
+// that Pi itself treats as retryable), which checks that Pi's own retry already sends a smaller body.
+// Usage: node scripts/e2e.mjs [--without-extension] [--buffer-error] [--turns=N] [--with-user-packages] [--keep]
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -12,10 +14,12 @@ import { fileURLToPath } from "node:url";
 import { deflateSync, crc32 } from "node:zlib";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const work = join(root, "e2e-work");
+const work = join(root, ".tmp", "e2e-work");
+const cli = join(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))), "bundle", "cli.js");
 const withExtension = !process.argv.includes("--without-extension");
 const LIMIT = 8 * 1024 * 1024;
-const TURNS = 6;
+const TURNS = Number(process.argv.find((arg) => arg.startsWith("--turns="))?.slice(8) ?? 6);
+const bufferError = process.argv.includes("--buffer-error");
 
 function chunk(type, data) {
 	const length = Buffer.alloc(4);
@@ -57,10 +61,12 @@ const server = createServer((req, res) => {
 		const body = Buffer.concat(parts);
 		const images = (body.toString("utf8").match(/data:image\//g) ?? []).length;
 		const rejected = body.length > LIMIT;
-		requests.push({ bytes: body.length, images, status: rejected ? 413 : 200 });
+		const status = rejected ? (bufferError ? 500 : 413) : 200;
+		requests.push({ bytes: body.length, images, status });
 		if (rejected) {
-			res.writeHead(413, { "content-type": "application/json" });
-			res.end(JSON.stringify({ error: { message: "Request exceeds the maximum size", type: "proxy_error", code: 413 } }));
+			const message = bufferError ? "exceeded request buffer limit while retrying upstream" : "Request exceeds the maximum size";
+			res.writeHead(status, { "content-type": "application/json" });
+			res.end(JSON.stringify({ error: { message, type: "proxy_error", code: status } }));
 			return;
 		}
 		res.writeHead(200, { "content-type": "text/event-stream" });
@@ -94,7 +100,7 @@ writeFileSync(
 );
 // --with-user-packages: also load the packages installed in the real agent dir (coexistence check).
 const withUserPackages = process.argv.includes("--with-user-packages");
-const settings = { retry: { maxRetries: 0 } };
+const settings = { retry: bufferError ? { maxRetries: 3, baseDelayMs: 50 } : { maxRetries: 0 } };
 if (withUserPackages) {
 	const realAgent = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 	settings.packages = JSON.parse(readFileSync(join(realAgent, "settings.json"), "utf8")).packages ?? [];
@@ -119,7 +125,8 @@ for (let turn = 1; turn <= TURNS; turn += 1) {
 	const before = requests.length;
 	// Async spawn: a synchronous child would block this process's mock server.
 	const run = await new Promise((done) => {
-		const child = spawn("pi", args, { env, shell: true, stdio: ["ignore", "pipe", "pipe"] });
+		const child = spawn(process.execPath, [cli, ...args], { cwd: work, env, stdio: ["ignore", "pipe", "pipe"] });
+		child.on("error", (error) => done({ status: 1, stdout: "", stderr: String(error) }));
 		let stdout = "";
 		let stderr = "";
 		child.stdout.on("data", (d) => (stdout += d));
@@ -149,7 +156,10 @@ for (const result of results) {
 	const sent = result.requests.map((r) => `${r.status} ${(r.bytes / 1048576).toFixed(1)}MB/${r.images}img`).join(", ");
 	console.log(`turn ${result.turn}: exit=${result.exit} requests=[${sent}] output=${result.output}`);
 }
-const lastOk = results.at(-1).requests.at(-1)?.status === 200;
+const lastOk = results.every((result) => result.exit === 0 && result.requests.at(-1)?.status === 200);
+const recovered = requests.some((request) => request.status >= 400);
+const recoveryVerified = TURNS < 10 || !withExtension || recovered;
+if (!recoveryVerified) console.error("FAIL: recovery run never exercised a rejection");
 console.log(withExtension ? (lastOk ? "PASS: final turn succeeded" : "FAIL: final turn did not succeed") : "control run finished");
 if (!process.argv.includes("--keep")) cleanup();
-process.exit(withExtension && !lastOk ? 1 : 0);
+process.exit(withExtension ? (lastOk && recoveryVerified ? 0 : 1) : (lastOk ? 1 : 0));

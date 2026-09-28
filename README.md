@@ -1,106 +1,69 @@
 # pi-image-budget
 
-[简体中文](README.zh-CN.md)
+[中文文档与完整配置表](README.zh-CN.md)
 
-A [Pi](https://pi.dev) extension that keeps image payloads in every model request within count and byte budgets, so long screenshot-heavy sessions never get stuck on `413 Request exceeds the maximum size`.
+A Pi extension that reduces image-heavy requests **before** they hit relay/provider limits. Original images and session messages are untouched: only outbound copies are rewritten. This cannot cure rate limits, overloaded servers, billing errors, or text-only context overflow.
 
-## The problem
+## Strategy
 
-Pi resends the whole conversation on every request, and images stay in it forever. Pi resizes each image only when it exceeds 2000×2000 px or 4.5 MB, so a typical 1920×1080 PNG screenshot (2–3.5 MB of base64) goes in unchanged. Read a dozen screenshots over a session and every request is 30+ MB. Gateways commonly cap request bodies at 20–32 MB, and from then on **every** request fails, including retries. Compaction does not help because it counts tokens, not image bytes. Upstream treats this as extension territory (earendil-works/pi#4642).
+- Keep at most **12 images** by default; prefer original quality for the newest **2**.
+- Compress older candidates to **1280px / 400KiB base64**, then omit the oldest images only if budgets still overflow. Output may be PNG or lossy JPEG. Reduced images carry dimension/coordinate mapping notes.
+- Enforce **2000px / 4.5MiB base64** per-image caps even on protected images. If protected images alone overflow the request, try compressing them too.
+- Enforce total **16MiB image data / 24MiB JSON body** budgets, with a **0.75 low watermark** for batch eviction. Keep omission text stable within a branch.
+- Deduplicate only byte-identical images of the same MIME type; sampled fingerprints are not treated as proof of equality.
+- Measure every final provider envelope without allocating another full JSON request string. Guard known Anthropic, OpenAI Chat/Responses, Gemini and Bedrock content arrays, including merged-message count caps. Never walk tool schemas or arbitrary metadata looking for images.
 
-## What it does
+## Recovery
 
-Before every provider request, on a per-request copy (the session file is never modified):
+Recognizes HTTP 413, `Request exceeds the maximum size`, `exceeded request buffer limit while retrying upstream`, image-count, single-image byte and dimension errors. Only numbers clearly associated with limits are learned. Limits follow the model and active session branch.
 
-1. **Image count budget**: keep at most `maxImages` images (default 8).
-2. **Image byte budget**: kept images total at most `maxImageBytes` (default 16 MB).
-3. **Request size budget**: the whole estimated request body stays under `maxRequestBytes` (default 24 MB). The estimate is calibrated against the real serialized payload after the first request.
-4. **Oldest first, newest protected**: the oldest images are replaced with a short text placeholder that names the source (for example `read D:/shots/ads.png (1920x1080, image/png, 3.1 MB)`), so the model knows it can read the file again. The newest `protectRecent` images (default 2) are never removed by budgets.
-5. **Cache friendly**: when a budget is exceeded, it evicts in one batch down to `limit × lowWatermark` (default 0.75), and evicted images stay evicted with byte-identical placeholders. The request prefix changes rarely, so provider prompt caches keep hitting.
-6. **Dedupe**: if the same image appears twice, only the newest copy is kept.
-7. **413 recovery**: if a gateway still rejects a body as too large (HTTP 413, or an equivalent error text), the limit for this model is lowered to 90% of the rejected size, stored in the session so it survives restarts, and the turn is retried automatically without the failed response.
-8. **Payload guard**: if the final provider payload still exceeds the limit (for example on the first request, before calibration), the oldest images are replaced directly in the payload. It supports Anthropic, OpenAI Chat/Responses, Gemini, and Bedrock wire formats.
-9. **Honors model catalog limits**: `inputLimits.maxRequestBytes`, `images.maxPerRequest`, and `images.maxPerMessage` from `models.json` are enforced. Pi documents these fields but does not enforce them yet.
+Learning happens at `message_end`, before Pi's own transient-error retry. The extension can initiate up to **2** additional continuations per input, only when the relevant metric actually shrinks. `autoRecover` and `maxAutoRecoveries` do **not** override Pi's native retry policy.
 
-## Install
+An invalid-image error only removes an image when a single-image request identifies it unambiguously. Multi-image errors are reported rather than guessing which image is corrupt. Compression failures are visible; originals under hard caps remain, oversized ones become placeholders. If the request still cannot fit, the extension warns instead of claiming success.
 
-```bash
-pi install npm:pi-image-budget
+## Performance and privacy
+
+Uses Pi's exported Photon `resizeImage`, no extra image dependency. At most two encodes run concurrently, only for candidates that can survive the count cap. First-time encoding can take around a second per screenshot; worker loading failures may make Pi fall back to in-process encoding.
+
+An in-memory LRU cache is bounded by **128 entries and 32MiB**, keyed by full SHA-256, MIME and target parameters. Failed encodes are cached too. No extra copies of screenshots are persisted on disk; cache eviction/restart may require deterministic re-encoding. Neutral message estimates count base64 lengths directly, while final payload sizing handles actual JSON escaping.
+
+## Installation
+
+```sh
+pi install git:github.com/Aaalice233/pi-image-budget
 ```
 
-It works with the defaults as soon as it is installed. The footer shows `img 6/14` whenever some images are omitted.
-
-It pairs well with a per-model resize profile, which makes each image small in the first place:
-
-```json
-// ~/.pi/agent/models.json → your model entry
-"inputLimits": { "images": { "resize": { "maxWidth": 1568, "maxHeight": 1568, "maxBytes": 1048576 } } }
-```
-
-## Configuration
-
-Optional. Global: `~/.pi/agent/image-budget.json`. Project (only when the project is trusted): `.pi/image-budget.json`, layered on top of the global file.
+Run `/reload` after updating an existing checkout. Optional configuration: `~/.pi/agent/image-budget.json`, then trusted-project `.pi/image-budget.json`.
 
 ```json
 {
-  "$schema": "https://unpkg.com/pi-image-budget/image-budget.schema.json",
-  "maxImages": 8,
-  "maxImageBytes": "16MB",
-  "maxRequestBytes": "24MB",
+  "maxImages": 12,
+  "compress": true,
+  "compressMaxDimension": 1280,
+  "compressMaxBytes": "400KB",
+  "maxBytesPerImage": "4.5MB",
+  "maxImageDimension": 2000,
   "protectRecent": 2,
-  "models": {
-    "my-gateway/*": { "maxRequestBytes": "30MB" },
-    "github-copilot/*": { "maxRequestBytes": "4MB", "maxImages": 3 }
-  }
+  "models": { "my-gateway/*": { "maxRequestBytes": "12MB" } }
 }
 ```
 
-| Option | Default | Meaning |
-|---|---|---|
-| `enabled` | `true` | Master switch |
-| `maxImages` | `8` | Images kept per request |
-| `maxImagesPerMessage` | unlimited | Images kept per message |
-| `maxImageBytes` | `16MB` | Total base64 bytes of kept images |
-| `maxRequestBytes` | `24MB` | Estimated whole request body |
-| `protectRecent` | `2` | Newest images that budgets never remove |
-| `lowWatermark` | `0.75` | Evict down to `limit × ratio` once a limit is hit |
-| `dedupe` | `true` | Keep only the newest copy of identical images |
-| `payloadGuard` | `true` | Last-resort scrub of the provider payload |
-| `autoRecover` | `true` | Lower the limit and retry after a 413 |
-| `maxAutoRecoveries` | `2` | Automatic 413 retries per prompt |
-| `initialOverheadBytes` | `512KB` | Assumed system prompt/tool size before the first measurement |
-| `showStatus` | `true` | Footer indicator when images are omitted |
-| `locale` | `auto` | `en`, `zh-CN`, or `auto` |
-| `models` | `{}` | Overrides of the limit options by `provider/modelId` glob |
+See [the schema](image-budget.schema.json) and [configuration table](README.zh-CN.md#安装与配置) for all options. Byte units are binary. Total count/byte limits accept `null` for unlimited; resize targets, retry count and protected count must be finite. Catalog `inputLimits` only tighten configured values, including image resize dimensions and bytes.
 
-Sizes accept bytes, `"512KB"`, `"24MB"`, and so on (1024-based), or `null` for unlimited. Invalid entries are reported once and ignored; the rest of the file still applies. Later `models` globs win, and model catalog limits only ever tighten the result.
-
-## Command
-
-`/image-budget [status|on|off|reset|reload]`
-
-- `status`: effective limits, last request statistics, and config sources.
-- `on` / `off`: toggle for this session.
-- `reset`: forget the learned 413 limit and eviction history for this session.
-- `reload`: re-read the config files.
-
-## Limitations
-
-- Omitted images are gone from the model's view until they are read again. Raise `maxImages` or `protectRecent` if your workflow compares many images at once.
-- The per-message cap applies to Pi messages. Providers that merge consecutive tool results into one wire message may see more images per message.
-- Existing oversized sessions recover on the next request after installing. The session file itself is not rewritten.
+`/image-budget [status|on|off|reset|reload]` shows statistics, controls the session switch, resets the current model's learned limits/invalid-image records and omissions, or reloads config. Footer statistics represent the neutral planning phase; further payload-guard removals are notified separately.
 
 ## Development
 
-```bash
-npm install
-npm run check      # TypeScript
-npm test           # unit + extension-wiring tests
-node scripts/e2e.mjs [--without-extension] [--with-user-packages]
+```sh
+npm ci
+npm run check
+npm test
+npm run bench
+node scripts/e2e.mjs --turns=10
+node scripts/e2e.mjs --buffer-error --turns=10
+node scripts/e2e.mjs --without-extension
 ```
 
-`scripts/e2e.mjs` runs the real `pi` CLI against a mock gateway that answers 413 above 8 MB. Without the extension, the session gets stuck; with it, the session recovers and stays usable.
+Tests cover real Photon encoding, memory bounds, config, branches, recovery, JSON sizing and provider envelopes. E2E uses a real local Pi CLI and an 8MiB mock gateway, without paid API calls. Work files live in `.tmp/e2e-work` and are normally cleaned up. The benchmark separates warm planning, final sizing, and original serialization; it does not claim to include first-time image encoding or Pi's context cloning.
 
-## License
-
-MIT
+MIT.
